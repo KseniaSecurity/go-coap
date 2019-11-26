@@ -874,7 +874,7 @@ func TestEncodeMessageWithAllOptions(t *testing.T) {
 		MessageBase: MessageBase{
 			typ:     Confirmable,
 			code:    GET,
-			token:   []byte("TOKEN"),
+			token:   []byte("T"),
 			payload: []byte("PAYLOAD"),
 		},
 		messageID: 12345,

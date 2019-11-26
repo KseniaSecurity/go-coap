@@ -14,7 +14,7 @@ import (
 type COAPType uint8
 
 // MaxTokenSize maximum of token size that can be used in message
-const MaxTokenSize = 8
+const MaxTokenSize = 1
 
 const (
 	// Confirmable messages require acknowledgements.

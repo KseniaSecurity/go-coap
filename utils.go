@@ -7,15 +7,21 @@ import (
 	"sync/atomic"
 )
 
+var tokenIter = uint32(0)
+
 // GenerateToken generates a random token by a given length
 func GenerateToken() ([]byte, error) {
 	b := make([]byte, MaxTokenSize)
-	_, err := rand.Read(b)
-	// Note that err == nil only if we read len(b) bytes.
-	if err != nil {
-		return nil, err
+	if MaxTokenSize > 1 {
+		_, err := rand.Read(b)
+		// Note that err == nil only if we read len(b) bytes.
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		b[0] = uint8(atomic.AddUint32(&tokenIter, 1) % 0xff)
+		return b, nil
 	}
-
 	return b, nil
 }
 
