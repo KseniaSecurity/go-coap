@@ -418,7 +418,7 @@ func (r *blockWiseReceiver) sizeType() OptionID {
 
 func determineCoapType(startedByClient bool, req Message) COAPType {
 	if startedByClient {
-		if req.Type() == Confirmable {
+		if req.Type() == Confirmable && req.Code() != Content {
 			return Acknowledgement
 		}
 		return req.Type()
