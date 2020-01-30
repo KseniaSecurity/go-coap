@@ -66,8 +66,7 @@ func WriteToSessionUDP(conn *net.UDPConn, session *ConnUDPContext, b []byte) (in
 		return conn.WriteToUDP(b, session.raddr)
 	}
 
-	n, _, err := conn.WriteMsgUDP(b, correctSource(session.context), nil)
-	return n, err
+	return conn.WriteToUDP(b, session.raddr)
 }
 
 // parseDstFromOOB takes oob data and returns the destination IP.
