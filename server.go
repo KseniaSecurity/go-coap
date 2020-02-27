@@ -13,8 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-ocf/go-coap/codes"
 	coapNet "github.com/go-ocf/go-coap/net"
-	"github.com/pion/dtls"
+	dtls "github.com/pion/dtls/v2"
 )
 
 // Interval for stop worker if no load
@@ -70,7 +71,7 @@ func (f HandlerFunc) ServeCOAP(w ResponseWriter, r *Request) {
 func HandleFailed(w ResponseWriter, req *Request) {
 	msg := req.Client.NewMessage(MessageParams{
 		Type:      Acknowledgement,
-		Code:      NotFound,
+		Code:      codes.NotFound,
 		MessageID: req.Msg.MessageID(),
 		Token:     req.Msg.Token(),
 	})
@@ -164,10 +165,12 @@ type Server struct {
 	BlockWiseTransfer *bool
 	// Set maximal block size of payload that will be send in fragment
 	BlockWiseTransferSzx *BlockWiseSzx
-	// Disable send tcp signal messages
-	DisableTCPSignalMessages bool
+	// Disable send tcp signal CSM message
+	DisableTCPSignalMessageCSM bool
 	// Disable processes Capabilities and Settings Messages from client - iotivity sends max message size without blockwise.
 	DisablePeerTCPSignalMessageCSMs bool
+	// Keepalive setup
+	KeepAlive KeepAlive
 
 	// UDP packet or TCP connection queue
 	queue chan *Request
@@ -318,21 +321,46 @@ func (srv *Server) ListenAndServe() error {
 }
 
 func (srv *Server) initServeUDP(connUDP *coapNet.ConnUDP) error {
-	return srv.serveUDP(newShutdownWithContext(srv.doneChan), connUDP)
+	doneChan, err := srv.initDone()
+	if err != nil {
+		return err
+	}
+
+	return srv.serveUDP(newShutdownWithContext(doneChan), connUDP)
 }
 
 func (srv *Server) initServeTCP(conn *coapNet.Conn) error {
+	doneChan, err := srv.initDone()
+	if err != nil {
+		return err
+	}
+
 	if srv.NotifyStartedFunc != nil {
 		srv.NotifyStartedFunc()
 	}
-	return srv.serveTCPConnection(newShutdownWithContext(srv.doneChan), conn)
+	return srv.serveTCPConnection(newShutdownWithContext(doneChan), conn)
+}
+
+func (srv *Server) initDone() (<-chan struct{}, error) {
+	srv.doneLock.Lock()
+	defer srv.doneLock.Unlock()
+	if srv.doneChan != nil {
+		return nil, fmt.Errorf("server already serve connections")
+	}
+	doneChan := make(chan struct{})
+	srv.doneChan = doneChan
+	return doneChan, nil
 }
 
 func (srv *Server) initServeDTLS(conn *coapNet.Conn) error {
+	doneChan, err := srv.initDone()
+	if err != nil {
+		return err
+	}
 	if srv.NotifyStartedFunc != nil {
 		srv.NotifyStartedFunc()
 	}
-	return srv.serveDTLSConnection(newShutdownWithContext(srv.doneChan), conn)
+	return srv.serveDTLSConnection(newShutdownWithContext(doneChan), conn)
 }
 
 // ActivateAndServe starts a coapserver with the PacketConn or Listener
@@ -371,18 +399,18 @@ func (srv *Server) ActivateAndServe() error {
 }
 
 func (srv *Server) activateAndServe(listener Listener, conn *coapNet.Conn, connUDP *coapNet.ConnUDP) error {
-	srv.doneLock.Lock()
-	if srv.doneChan != nil {
-		return fmt.Errorf("server already serve connections")
-	}
-	srv.doneChan = make(chan struct{})
-	srv.doneLock.Unlock()
-
 	if srv.MaxMessageSize > 0 && srv.MaxMessageSize < uint32(szxToBytes[BlockWiseSzx16]) {
 		return ErrInvalidMaxMesssageSizeParameter
 	}
 
+	err := validateKeepAlive(srv.KeepAlive)
+	if err != nil {
+		return fmt.Errorf("keepalive: %w", err)
+	}
+
+	srv.sessionUDPMapLock.Lock()
 	srv.sessionUDPMap = make(map[string]networkSession)
+	srv.sessionUDPMapLock.Unlock()
 
 	srv.queue = make(chan *Request)
 	defer close(srv.queue)
@@ -392,6 +420,9 @@ func (srv *Server) activateAndServe(listener Listener, conn *coapNet.Conn, connU
 			session, err := newSessionTCP(connection, srv)
 			if err != nil {
 				return nil, err
+			}
+			if srv.KeepAlive.Enable {
+				session = newKeepAliveSession(session, srv)
 			}
 			if session.blockWiseEnabled() {
 				return &blockWiseSession{networkSession: session}, nil
@@ -406,6 +437,9 @@ func (srv *Server) activateAndServe(listener Listener, conn *coapNet.Conn, connU
 			if err != nil {
 				return nil, err
 			}
+			if srv.KeepAlive.Enable {
+				session = newKeepAliveSession(session, srv)
+			}
 			if session.blockWiseEnabled() {
 				return &blockWiseSession{networkSession: session}, nil
 			}
@@ -418,6 +452,9 @@ func (srv *Server) activateAndServe(listener Listener, conn *coapNet.Conn, connU
 			session, err := newSessionUDP(connection, srv, sessionUDPData)
 			if err != nil {
 				return nil, err
+			}
+			if srv.KeepAlive.Enable {
+				session = newKeepAliveSession(session, srv)
 			}
 			if session.blockWiseEnabled() {
 				return &blockWiseSession{networkSession: session}, nil
@@ -504,7 +541,7 @@ func (srv *Server) serveDTLSConnection(ctx *shutdownContext, conn *coapNet.Conn)
 		m := make([]byte, ^uint16(0))
 		n, err := conn.ReadWithContext(ctx, m)
 		if err != nil {
-			err := fmt.Errorf("cannot serve UDP connection %v", err)
+			err := fmt.Errorf("cannot serve DTLS connection %v", err)
 			srv.closeSessions(err)
 			return err
 		}
@@ -522,20 +559,25 @@ func (srv *Server) serveDTLSConnection(ctx *shutdownContext, conn *coapNet.Conn)
 
 // serveListener starts a DTLS listener for the server.
 func (srv *Server) serveDTLSListener(l Listener) error {
+	doneChan, err := srv.initDone()
+	if err != nil {
+		return err
+	}
+
 	if srv.NotifyStartedFunc != nil {
 		srv.NotifyStartedFunc()
 	}
 
 	var wg sync.WaitGroup
-	ctx := newShutdownWithContext(srv.doneChan)
+	ctx := newShutdownWithContext(doneChan)
 
 	for {
 		rw, err := l.AcceptWithContext(ctx)
 		if err != nil {
 			switch err {
-			case ErrServerClosed:
+			case ErrServerClosed, context.DeadlineExceeded, context.Canceled:
 				wg.Wait()
-				return fmt.Errorf("cannot serve dtls: %v", err)
+				return fmt.Errorf("cannot accept DTLS: %v", err)
 			default:
 				continue
 			}
@@ -564,23 +606,23 @@ func (srv *Server) serveTCPConnection(ctx *shutdownContext, conn *coapNet.Conn) 
 	for {
 		mti, err := readTcpMsgInfo(ctx, conn)
 		if err != nil {
-			return session.closeWithError(fmt.Errorf("cannot serve tcp connection: %v", err))
+			return session.closeWithError(fmt.Errorf("cannot serve TCP connection: %v", err))
 		}
 
 		if srv.MaxMessageSize != 0 &&
 			uint32(mti.totLen) > srv.MaxMessageSize {
-			return session.closeWithError(fmt.Errorf("cannot serve tcp connection: %v", ErrMaxMessageSizeLimitExceeded))
+			return session.closeWithError(fmt.Errorf("cannot serve TCP connection: %v", ErrMaxMessageSizeLimitExceeded))
 		}
 
 		body := make([]byte, mti.BodyLen())
 		err = conn.ReadFullWithContext(ctx, body)
 		if err != nil {
-			return session.closeWithError(fmt.Errorf("cannot serve tcp connection: %v", err))
+			return session.closeWithError(fmt.Errorf("cannot serve TCP connection: %v", err))
 		}
 
 		o, p, err := parseTcpOptionsPayload(mti, body)
 		if err != nil {
-			return session.closeWithError(fmt.Errorf("cannot serve tcp connection: %v", err))
+			return session.closeWithError(fmt.Errorf("cannot serve TCP connection: %v", err))
 		}
 
 		msg := new(TcpMessage)
@@ -596,20 +638,25 @@ func (srv *Server) serveTCPConnection(ctx *shutdownContext, conn *coapNet.Conn) 
 
 // serveListener starts a TCP listener for the server.
 func (srv *Server) serveTCPListener(l Listener) error {
+	doneChan, err := srv.initDone()
+	if err != nil {
+		return err
+	}
+
 	if srv.NotifyStartedFunc != nil {
 		srv.NotifyStartedFunc()
 	}
 
 	var wg sync.WaitGroup
-	ctx := newShutdownWithContext(srv.doneChan)
+	ctx := newShutdownWithContext(doneChan)
 
 	for {
 		rw, err := l.AcceptWithContext(ctx)
 		if err != nil {
 			switch err {
-			case ErrServerClosed:
+			case ErrServerClosed, context.DeadlineExceeded, context.Canceled:
 				wg.Wait()
-				return fmt.Errorf("cannot serve tcp: %v", err)
+				return fmt.Errorf("cannot accept TCP: %v", err)
 			default:
 				continue
 			}
@@ -630,8 +677,7 @@ func (srv *Server) closeSessions(err error) {
 	srv.sessionUDPMap = make(map[string]networkSession)
 	srv.sessionUDPMapLock.Unlock()
 	for _, v := range tmp {
-		c := ClientConn{commander: &ClientCommander{v}}
-		srv.NotifySessionEndFunc(&c, err)
+		v.closeWithError(err)
 	}
 }
 

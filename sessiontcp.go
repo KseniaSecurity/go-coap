@@ -7,11 +7,12 @@ import (
 	"net"
 	"sync/atomic"
 
+	"github.com/go-ocf/go-coap/codes"
 	coapNet "github.com/go-ocf/go-coap/net"
 )
 
 type sessionTCP struct {
-	sessionBase
+	*sessionBase
 	connection *coapNet.Conn
 
 	peerBlockWiseTransfer           uint32
@@ -33,21 +34,14 @@ func newSessionTCP(connection *coapNet.Conn, srv *Server) (networkSession, error
 		peerMaxMessageSize:              uint32(srv.MaxMessageSize),
 		disablePeerTCPSignalMessageCSMs: srv.DisablePeerTCPSignalMessageCSMs,
 		connection:                      connection,
-		sessionBase: sessionBase{
-			srv:                  srv,
-			handler:              &TokenHandler{tokenHandlers: make(map[[MaxTokenSize]byte]HandlerFunc)},
-			blockWiseTransfer:    BlockWiseTransfer,
-			blockWiseTransferSzx: uint32(BlockWiseTransferSzx),
-			mapPairs:             make(map[[MaxTokenSize]byte]map[uint16](*sessionResp)),
-		},
+		sessionBase:                     newBaseSession(BlockWiseTransfer, BlockWiseTransferSzx, srv),
 	}
 
-	if !s.srv.DisableTCPSignalMessages {
+	if !s.srv.DisableTCPSignalMessageCSM {
 		if err := s.sendCSM(); err != nil {
 			return nil, err
 		}
 	}
-
 	return s, nil
 }
 
@@ -82,40 +76,36 @@ func (s *sessionTCP) blockWiseIsValid(szx BlockWiseSzx) bool {
 }
 
 func (s *sessionTCP) PingWithContext(ctx context.Context) error {
-	if s.srv.DisableTCPSignalMessages {
-		return fmt.Errorf("cannot send ping: TCP Signal messages are disabled")
-	}
 	token, err := GenerateToken()
 	if err != nil {
 		return err
 	}
 	req := s.NewMessage(MessageParams{
 		Type:  NonConfirmable,
-		Code:  Ping,
+		Code:  codes.Ping,
 		Token: []byte(token),
 	})
 	resp, err := s.ExchangeWithContext(ctx, req)
 	if err != nil {
 		return err
 	}
-	if resp.Code() == Pong {
+	if resp.Code() == codes.Pong {
 		return nil
 	}
 	return ErrInvalidResponse
 }
 
 func (s *sessionTCP) closeWithError(err error) error {
-	if s.connection != nil {
+	if s.sessionBase.Close() == nil {
 		c := ClientConn{commander: &ClientCommander{s}}
 		s.srv.NotifySessionEndFunc(&c, err)
 		e := s.connection.Close()
-		//s.connection = nil
 		if e == nil {
 			e = err
 		}
 		return e
 	}
-	return err
+	return nil
 }
 
 // Close implements the networkSession.Close method
@@ -174,7 +164,7 @@ func (s *sessionTCP) sendCSM() error {
 	}
 	req := s.NewMessage(MessageParams{
 		Type:  NonConfirmable,
-		Code:  CSM,
+		Code:  codes.CSM,
 		Token: []byte(token),
 	})
 	if s.srv.MaxMessageSize != 0 {
@@ -201,7 +191,7 @@ func (s *sessionTCP) setPeerBlockWiseTransfer(val bool) {
 func (s *sessionTCP) sendPong(w ResponseWriter, r *Request) error {
 	req := s.NewMessage(MessageParams{
 		Type:  NonConfirmable,
-		Code:  Pong,
+		Code:  codes.Pong,
 		Token: r.Msg.Token(),
 	})
 	return w.WriteMsgWithContext(r.Ctx, req)
@@ -209,7 +199,7 @@ func (s *sessionTCP) sendPong(w ResponseWriter, r *Request) error {
 
 func (s *sessionTCP) handleSignals(w ResponseWriter, r *Request) bool {
 	switch r.Msg.Code() {
-	case CSM:
+	case codes.CSM:
 		if s.disablePeerTCPSignalMessageCSMs {
 			return true
 		}
@@ -238,18 +228,18 @@ func (s *sessionTCP) handleSignals(w ResponseWriter, r *Request) bool {
 		}
 
 		return true
-	case Ping:
+	case codes.Ping:
 		if r.Msg.Option(Custody) != nil {
 			//TODO
 		}
 		s.sendPong(w, r)
 		return true
-	case Release:
+	case codes.Release:
 		if _, ok := r.Msg.Option(AlternativeAddress).(string); ok {
 			//TODO
 		}
 		return true
-	case Abort:
+	case codes.Abort:
 		if _, ok := r.Msg.Option(BadCSMOption).(uint32); ok {
 			//TODO
 		}

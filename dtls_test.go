@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/dtls"
+	dtls "github.com/pion/dtls/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,15 +101,11 @@ func generateRSACertsPEM(t *testing.T) ([]byte, []byte) {
 
 func TestRSACerts(t *testing.T) {
 	cert, key := generateRSACertsPEM(t)
-	keys, err := tls.X509KeyPair(cert, key)
+	c, err := tls.X509KeyPair(cert, key)
 	require.NoError(t, err)
-	certificate, err := x509.ParseCertificate(keys.Certificate[0])
-	require.NoError(t, err)
-	privateKey := keys.PrivateKey
 
 	config := &dtls.Config{
-		Certificate:          certificate,
-		PrivateKey:           privateKey,
+		Certificates:         []tls.Certificate{c},
 		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
 		ConnectTimeout:       dtls.ConnectTimeoutOption(30 * time.Second),
 		InsecureSkipVerify:   true,
@@ -120,7 +116,7 @@ func TestRSACerts(t *testing.T) {
 		Net:        "udp-dtls",
 		Addr:       ":5688",
 		DTLSConfig: config,
-		Handler: HandlerFunc(EchoServer),
+		Handler:    HandlerFunc(EchoServer),
 	}
 	err = s.ListenAndServe()
 	require.Error(t, err)

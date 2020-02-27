@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"sync/atomic"
+
+	"github.com/go-ocf/go-coap/codes"
 )
 
 const (
@@ -115,17 +117,14 @@ func exchangeDrivedByPeer(ctx context.Context, session networkSession, req Messa
 	case resp := <-pair:
 		return resp.Msg, nil
 	case <-ctx.Done():
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("cannot exchange drived by peer: %v", err)
-		}
-		return nil, ErrTimeout
+		return nil, ctx.Err()
 	}
 }
 
 type blockWiseSender struct {
 	startedByClient bool
 	blockType       OptionID
-	expectedCode    COAPCode
+	expectedCode    codes.Code
 	origin          Message
 
 	currentNum  uint
@@ -140,7 +139,7 @@ func (s *blockWiseSender) sizeType() OptionID {
 	return Size1
 }
 
-func newSender(startedByClient bool, blockType OptionID, suggestedSzx BlockWiseSzx, expectedCode COAPCode, origin Message) *blockWiseSender {
+func newSender(startedByClient bool, blockType OptionID, suggestedSzx BlockWiseSzx, expectedCode codes.Code, origin Message) *blockWiseSender {
 	return &blockWiseSender{
 		startedByClient: startedByClient,
 		blockType:       blockType,
@@ -285,7 +284,7 @@ func (s *blockWiseSender) processResp(ctx context.Context, b *blockWiseSession, 
 	return nil, nil
 }
 
-func (b *blockWiseSession) sendPayload(ctx context.Context, startedByClient bool, blockType OptionID, suggestedSzx BlockWiseSzx, expectedCode COAPCode, msg Message) (Message, error) {
+func (b *blockWiseSession) sendPayload(ctx context.Context, startedByClient bool, blockType OptionID, suggestedSzx BlockWiseSzx, expectedCode codes.Code, msg Message) (Message, error) {
 	s := newSender(startedByClient, blockType, suggestedSzx, expectedCode, msg)
 	req, err := s.newReq(b)
 	if err != nil {
@@ -319,15 +318,15 @@ func (b *blockWiseSession) Exchange(msg Message) (Message, error) {
 func (b *blockWiseSession) ExchangeWithContext(ctx context.Context, msg Message) (Message, error) {
 	switch msg.Code() {
 	//these methods doesn't need to be handled by blockwise
-	case CSM, Ping, Pong, Release, Abort, Empty:
+	case codes.CSM, codes.Ping, codes.Pong, codes.Release, codes.Abort, codes.Empty:
 		return b.networkSession.ExchangeWithContext(ctx, msg)
-	case GET, DELETE:
+	case codes.GET, codes.DELETE:
 		return b.receivePayload(ctx, false, msg, nil, Block2, msg.Code())
-	case POST, PUT:
-		return b.sendPayload(ctx, false, Block1, b.networkSession.blockWiseSzx(), Continue, msg)
+	case codes.POST, codes.PUT:
+		return b.sendPayload(ctx, false, Block1, b.networkSession.blockWiseSzx(), codes.Continue, msg)
 	// for response code
 	default:
-		return b.sendPayload(ctx, true, Block2, b.networkSession.blockWiseSzx(), Continue, msg)
+		return b.sendPayload(ctx, true, Block2, b.networkSession.blockWiseSzx(), codes.Continue, msg)
 	}
 
 }
@@ -360,7 +359,7 @@ func (b *blockWiseSession) WriteMsgWithContext(ctx context.Context, msg Message)
 		return err
 	}
 	switch msg.Code() {
-	case CSM, Ping, Pong, Release, Abort, Empty, GET:
+	case codes.CSM, codes.Ping, codes.Pong, codes.Release, codes.Abort, codes.Empty, codes.GET:
 		return b.networkSession.WriteMsgWithContext(ctx, msg)
 	default:
 		_, err := b.ExchangeWithContext(ctx, msg)
@@ -380,7 +379,7 @@ func calcStartOffset(num uint, szx BlockWiseSzx) int {
 	return int(num) * szxToBytes[szx]
 }
 
-func (b *blockWiseSession) sendErrorMsg(ctx context.Context, code COAPCode, typ COAPType, token []byte, MessageID uint16, err error) {
+func (b *blockWiseSession) sendErrorMsg(ctx context.Context, code codes.Code, typ COAPType, token []byte, MessageID uint16, err error) {
 	req := b.NewMessage(MessageParams{
 		Code:      code,
 		Type:      typ,
@@ -396,8 +395,8 @@ func (b *blockWiseSession) sendErrorMsg(ctx context.Context, code COAPCode, typ 
 
 type blockWiseReceiver struct {
 	startedByClient bool
-	code            COAPCode
-	expectedCode    COAPCode
+	code            codes.Code
+	expectedCode    codes.Code
 	typ             COAPType
 	origin          Message
 	blockType       OptionID
@@ -418,7 +417,7 @@ func (r *blockWiseReceiver) sizeType() OptionID {
 
 func determineCoapType(startedByClient bool, req Message) COAPType {
 	if startedByClient {
-		if req.Type() == Confirmable && req.Code() != Content {
+		if req.Type() == Confirmable && req.Code() != codes.Content {
 			return Acknowledgement
 		}
 		return req.Type()
@@ -459,7 +458,7 @@ func (r *blockWiseReceiver) newReq(b *blockWiseSession, resp Message) (Message, 
 	return req, nil
 }
 
-func newReceiver(b *blockWiseSession, startedByClient bool, origin Message, resp Message, blockType OptionID, code COAPCode) (r *blockWiseReceiver, res Message, err error) {
+func newReceiver(b *blockWiseSession, startedByClient bool, origin Message, resp Message, blockType OptionID, code codes.Code) (r *blockWiseReceiver, res Message, err error) {
 	r = &blockWiseReceiver{
 		startedByClient: startedByClient,
 		code:            code,
@@ -646,7 +645,12 @@ func (r *blockWiseReceiver) processResp(b *blockWiseSession, req Message, resp M
 	return nil, nil
 }
 
-func (r *blockWiseReceiver) sendError(ctx context.Context, b *blockWiseSession, code COAPCode, resp Message, err error) {
+func (r *blockWiseReceiver) sendError(ctx context.Context, b *blockWiseSession, code codes.Code, resp Message, err error) {
+	if err == ErrConnectionClosed {
+		// don't send error when connection was closed
+		return
+	}
+
 	var MessageID uint16
 	var token []byte
 	var typ COAPType
@@ -666,10 +670,10 @@ func (r *blockWiseReceiver) sendError(ctx context.Context, b *blockWiseSession, 
 	b.sendErrorMsg(ctx, code, typ, token, MessageID, err)
 }
 
-func (b *blockWiseSession) receivePayload(ctx context.Context, startedByClient bool, msg Message, resp Message, blockType OptionID, code COAPCode) (Message, error) {
+func (b *blockWiseSession) receivePayload(ctx context.Context, startedByClient bool, msg Message, resp Message, blockType OptionID, code codes.Code) (Message, error) {
 	r, resp, err := newReceiver(b, startedByClient, msg, resp, blockType, code)
 	if err != nil {
-		r.sendError(ctx, b, BadRequest, resp, err)
+		r.sendError(ctx, b, codes.BadRequest, resp, err)
 		return nil, err
 	}
 	if resp != nil {
@@ -678,7 +682,7 @@ func (b *blockWiseSession) receivePayload(ctx context.Context, startedByClient b
 
 	req, err := r.newReq(b, resp)
 	if err != nil {
-		r.sendError(ctx, b, BadRequest, resp, err)
+		r.sendError(ctx, b, codes.BadRequest, resp, err)
 		return nil, err
 	}
 
@@ -686,17 +690,17 @@ func (b *blockWiseSession) receivePayload(ctx context.Context, startedByClient b
 		bwResp, err := r.exchange(ctx, b, req)
 
 		if err != nil {
-			r.sendError(ctx, b, BadRequest, resp, err)
+			r.sendError(ctx, b, codes.BadRequest, resp, err)
 			return nil, err
 		}
 
 		resp, err := r.processResp(b, req, bwResp)
 
 		if err != nil {
-			errCode := BadRequest
+			errCode := codes.BadRequest
 			switch err {
 			case ErrRequestEntityIncomplete:
-				errCode = RequestEntityIncomplete
+				errCode = codes.RequestEntityIncomplete
 			}
 			r.sendError(ctx, b, errCode, resp, err)
 			return nil, err
@@ -714,9 +718,9 @@ func handleBlockWiseMsg(w ResponseWriter, r *Request, next func(w ResponseWriter
 	}
 	if r.Msg.Token() != nil {
 		switch r.Msg.Code() {
-		case PUT, POST:
+		case codes.PUT, codes.POST:
 			if b, ok := r.Client.networkSession().(*blockWiseSession); ok {
-				msg, err := b.receivePayload(r.Ctx, true, r.Msg, nil, Block1, Continue)
+				msg, err := b.receivePayload(r.Ctx, true, r.Msg, nil, Block1, codes.Continue)
 
 				if err != nil {
 					return
@@ -766,11 +770,11 @@ type blockWiseResponseWriter struct {
 	responseWriter ResponseWriter
 }
 
-func (w *blockWiseResponseWriter) NewResponse(code COAPCode) Message {
+func (w *blockWiseResponseWriter) NewResponse(code codes.Code) Message {
 	return w.responseWriter.NewResponse(code)
 }
 
-func (w *blockWiseResponseWriter) SetCode(code COAPCode) {
+func (w *blockWiseResponseWriter) SetCode(code codes.Code) {
 	w.responseWriter.SetCode(code)
 }
 
@@ -778,7 +782,7 @@ func (w *blockWiseResponseWriter) SetContentFormat(contentFormat MediaType) {
 	w.responseWriter.SetContentFormat(contentFormat)
 }
 
-func (w *blockWiseResponseWriter) getCode() *COAPCode {
+func (w *blockWiseResponseWriter) getCode() *codes.Code {
 	return w.responseWriter.getCode()
 }
 
@@ -841,11 +845,11 @@ type blockWiseNoticeWriter struct {
 	responseWriter ResponseWriter
 }
 
-func (w *blockWiseNoticeWriter) NewResponse(code COAPCode) Message {
+func (w *blockWiseNoticeWriter) NewResponse(code codes.Code) Message {
 	return w.responseWriter.NewResponse(code)
 }
 
-func (w *blockWiseNoticeWriter) SetCode(code COAPCode) {
+func (w *blockWiseNoticeWriter) SetCode(code codes.Code) {
 	w.responseWriter.SetCode(code)
 }
 
@@ -853,7 +857,7 @@ func (w *blockWiseNoticeWriter) SetContentFormat(contentFormat MediaType) {
 	w.responseWriter.SetContentFormat(contentFormat)
 }
 
-func (w *blockWiseNoticeWriter) getCode() *COAPCode {
+func (w *blockWiseNoticeWriter) getCode() *codes.Code {
 	return w.responseWriter.getCode()
 }
 

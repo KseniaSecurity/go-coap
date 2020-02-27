@@ -5,7 +5,8 @@ import (
 	"log"
 
 	coap "github.com/go-ocf/go-coap"
-	"github.com/pion/dtls"
+	"github.com/go-ocf/go-coap/codes"
+	dtls "github.com/pion/dtls/v2"
 )
 
 func handleA(w coap.ResponseWriter, req *coap.Request) {
@@ -19,7 +20,7 @@ func handleA(w coap.ResponseWriter, req *coap.Request) {
 
 func handleB(w coap.ResponseWriter, req *coap.Request) {
 	log.Printf("Got message in handleB: path=%q: %#v from %v", req.Msg.Path(), req.Msg, req.Client.RemoteAddr())
-	resp := w.NewResponse(coap.Content)
+	resp := w.NewResponse(codes.Content)
 	resp.SetOption(coap.ContentFormat, coap.TextPlain)
 	resp.SetPayload([]byte("good bye!"))
 	log.Printf("Transmitting from B %#v", resp)
