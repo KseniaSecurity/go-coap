@@ -629,7 +629,7 @@ func (r *blockWiseReceiver) processResp(b *blockWiseSession, req Message, resp M
 		if blockWiseDebug {
 			log.Printf("receivePayload szx=%v num=%v more=%v\n", szx, r.nextNum, more)
 		}
-		block, err := MarshalBlockOption(szx, r.nextNum, more)
+		block, err := MarshalBlockOption(szx, r.nextNum, false)
 		if err != nil {
 			return nil, err
 		}
