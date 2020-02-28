@@ -305,11 +305,12 @@ func (cc *ClientCommander) ObserveWithContext(
 	if err != nil {
 		return nil, err
 	}
-	err = cc.WriteMsgWithContext(ctx, req)
+	resp, err := cc.ExchangeWithContext(ctx, req)
 	if err != nil {
 		cc.networkSession.TokenHandler().Remove(o.token)
 		return nil, err
 	}
+	observeFunc(&Request{Msg: resp, Ctx: ctx})
 
 	return o, nil
 }
