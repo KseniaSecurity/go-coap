@@ -278,8 +278,8 @@ func (cc *ClientCommander) ObserveWithContext(
 		setObsSequence := func() bool {
 			if r.Msg.Option(Observe) != nil {
 				obsSequence := r.Msg.Option(Observe).(uint32)
-				//obs starts with 0, after that check obsSequence
-				if obsSequence != 0 && o.obsSequence > obsSequence {
+				//do not need check the sequence order, the observations are sequantial and with ack
+				if obsSequence == 0 {
 					return false
 				}
 				o.obsSequence = obsSequence
